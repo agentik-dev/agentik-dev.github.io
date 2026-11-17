@@ -1,0 +1,149 @@
+#!/usr/bin/python3
+"""workflow-check: the pages workflow still deploys what this repo is for.
+
+Reads `.github/workflows/pages.yml` (or the file named) as text, with no YAML
+library, and asks four things of it:
+
+- it checks out the profile repo: a `repository: agentik-dev/.github` line;
+- at `main`: a `ref: main` line;
+- it deploys the `site` folder: a `path: site` line;
+- its `on:` names `workflow_dispatch` and no other trigger.
+
+Each failure is one line on stderr; exit 0 when all hold, 1 when one fails,
+2 on a usage error or an unreadable file.
+
+`--self-test` checks the real workflow, then writes broken copies of it into a
+temp folder, one per rule, and wants each refused; exit 0 when all go as they
+should.
+
+Usage: workflow-check [--self-test | FILE]
+"""
+import os
+import re
+import sys
+import tempfile
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT = os.path.join(ROOT, ".github", "workflows", "pages.yml")
+PROFILE = "agentik-dev/.github"
+TRIGGER = "workflow_dispatch"
+
+LINES = (
+    (r"repository:\s*['\"]?" + re.escape(PROFILE) + r"['\"]?",
+     "it does not check out the profile repo " + PROFILE),
+    (r"ref:\s*['\"]?main['\"]?", "it does not check out main"),
+    (r"path:\s*['\"]?site/?['\"]?", "it does not deploy the site folder"),
+)
+
+
+def strip(line):
+    """A line without its comment and trailing space (a `#` after a space or at the start)."""
+    return re.sub(r"(^|\s)#.*$", "", line).rstrip()
+
+
+def triggers(lines):
+    """The trigger names under the top-level `on:` key, or None when there is none."""
+    for i, raw in enumerate(lines):
+        m = re.match(r"""^(?:on|'on'|"on")\s*:(.*)$""", strip(raw))
+        if not m:
+            continue
+        inline = m.group(1).strip()
+        if inline:
+            return [t.strip().strip("'\"") for t in inline.strip("[]").split(",") if t.strip()]
+        names, indent = [], None
+        for nxt in lines[i + 1:]:
+            line = strip(nxt)
+            if not line.strip():
+                continue
+            depth = len(line) - len(line.lstrip(" "))
+            if depth == 0:
+                break
+            if indent is None:
+                indent = depth
+            if depth == indent:
+                names.append(line.strip().lstrip("- ").split(":")[0].strip().strip("'\""))
+        return names
+    return None
+
+
+def problems(text):
+    lines = text.splitlines()
+    found = []
+    for pattern, why in LINES:
+        if not any(re.fullmatch(r"\s*-?\s*" + pattern, strip(l)) for l in lines):
+            found.append(why)
+    names = triggers(lines)
+    if names is None:
+        found.append("it has no top-level on: key")
+    else:
+        if TRIGGER not in names:
+            found.append("it is not started by " + TRIGGER)
+        others = [n for n in names if n != TRIGGER]
+        if others:
+            found.append("it has another trigger: " + ", ".join(others))
+    return found
+
+
+def check(path):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError as exc:
+        sys.stderr.write("workflow-check: cannot read %s: %s\n" % (path, exc.strerror))
+        return 2
+    found = problems(text)
+    for why in found:
+        sys.stderr.write("workflow-check: %s: %s\n" % (path, why))
+    return 1 if found else 0
+
+
+# Each broken copy: (what it breaks, the text replaced, its replacement).
+BREAKS = (
+    ("another trigger", "  workflow_dispatch:\n", "  workflow_dispatch:\n  push:\n    branches: [main]\n"),
+    ("no dispatch", "  workflow_dispatch:\n", "  push:\n"),
+    ("another repo", "repository: " + PROFILE, "repository: example-org/example"),
+    ("another ref", "ref: main", "ref: next"),
+    ("another folder", "path: site", "path: public"),
+)
+
+
+def self_test():
+    with open(DEFAULT, encoding="utf-8") as fh:
+        real = fh.read()
+    bad = []
+    if problems(real):
+        bad.append("the real workflow is refused: " + "; ".join(problems(real)))
+    with tempfile.TemporaryDirectory() as tmp:
+        for name, old, new in BREAKS:
+            if old not in real:
+                bad.append("%s: the real workflow lacks %r, so the copy breaks nothing" % (name, old))
+                continue
+            path = os.path.join(tmp, "pages.yml")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(real.replace(old, new, 1))
+            with open(path, encoding="utf-8") as fh:
+                if not problems(fh.read()):
+                    bad.append("%s: the broken copy passes" % name)
+    for line in bad:
+        sys.stderr.write("workflow-check --self-test: %s\n" % line)
+    if not bad:
+        print("workflow-check --self-test: the real workflow passes, %d broken copies refused"
+              % len(BREAKS))
+    return 1 if bad else 0
+
+
+def main(argv):
+    if argv == ["--self-test"]:
+        return self_test()
+    if len(argv) > 1 or (argv and argv[0].startswith("-")):
+        sys.stderr.write("usage: workflow-check [--self-test | FILE]\n")
+        return 2
+    path = argv[0] if argv else DEFAULT
+    code = check(path)
+    if code == 0:
+        print("workflow-check: %s passes" % os.path.relpath(path, ROOT))
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
