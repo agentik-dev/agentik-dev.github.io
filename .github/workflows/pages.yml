@@ -1,0 +1,40 @@
+name: pages
+# Serve the organisation's root page (https://agentik-dev.github.io/) from the
+# `site` folder of the profile repo agentik-dev/.github at main; the page is
+# edited there, never here. Started by hand alone:
+# `gh workflow run pages.yml -R agentik-dev/agentik-dev.github.io`.
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: agentik-dev/.github
+          ref: main
+      - run: |
+          if [ ! -f site/index.html ]; then
+            echo "site/index.html is absent from agentik-dev/.github at main; nothing to deploy." >&2
+            exit 1
+          fi
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
